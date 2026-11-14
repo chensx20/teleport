@@ -55,11 +55,27 @@ func onListDatabases(cf *CLIConf) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
+	servers = uniqueDatabaseServers(servers)
 	sort.Slice(servers, func(i, j int) bool {
 		return servers[i].GetName() < servers[j].GetName()
 	})
 	showDatabases(tc.SiteName, servers, profile.Databases, cf.Verbose)
 	return nil
+}
+
+// uniqueDatabaseServers retains the first server registered for each exact name.
+func uniqueDatabaseServers(servers []types.DatabaseServer) []types.DatabaseServer {
+	seen := make(map[string]struct{}, len(servers))
+	unique := make([]types.DatabaseServer, 0, len(servers))
+	for _, server := range servers {
+		name := server.GetName()
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		unique = append(unique, server)
+	}
+	return unique
 }
 
 // onDatabaseLogin implements "tsh db login" command.

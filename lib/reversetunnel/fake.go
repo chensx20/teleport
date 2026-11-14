@@ -18,6 +18,7 @@ package reversetunnel
 
 import (
 	"net"
+	"sync"
 
 	"github.com/gravitational/teleport/lib/auth"
 
@@ -54,7 +55,9 @@ type FakeRemoteSite struct {
 	// ConnCh receives the connection when dialing this site.
 	ConnCh chan net.Conn
 	// AccessPoint is the auth server client.
-	AccessPoint auth.AccessPoint
+	AccessPoint  auth.AccessPoint
+	dialErrorsMu sync.RWMutex
+	dialErrors   map[string]error
 }
 
 // CachingAccessPoint returns caching auth server client.
@@ -67,8 +70,24 @@ func (s *FakeRemoteSite) GetName() string {
 	return s.Name
 }
 
+// SetDialError configures a host-specific dial error for tests.
+func (s *FakeRemoteSite) SetDialError(serverID string, err error) {
+	s.dialErrorsMu.Lock()
+	defer s.dialErrorsMu.Unlock()
+	if s.dialErrors == nil {
+		s.dialErrors = make(map[string]error)
+	}
+	s.dialErrors[serverID] = err
+}
+
 // Dial returns the connection to the remote site.
 func (s *FakeRemoteSite) Dial(params DialParams) (net.Conn, error) {
+	s.dialErrorsMu.RLock()
+	err := s.dialErrors[params.ServerID]
+	s.dialErrorsMu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
 	readerConn, writerConn := net.Pipe()
 	s.ConnCh <- readerConn
 	return writerConn, nil

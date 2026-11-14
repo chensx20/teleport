@@ -18,6 +18,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"testing"
@@ -159,6 +160,42 @@ func TestAccessPostgres(t *testing.T) {
 
 // TestAccessMySQL verifies access scenarios to a MySQL database based
 // on the configured RBAC rules.
+func TestAccessPostgresFailover(t *testing.T) {
+	ctx := context.Background()
+	testCtx := setupTestContext(ctx, t, withSelfHostedPostgres("postgres"))
+	server := testCtx.postgres["postgres"].server
+	offlineServer := server.Copy().(*types.DatabaseServerV3)
+	offlineServer.Spec.HostID = "offline-host"
+	_, err := testCtx.authClient.UpsertDatabaseServer(ctx, offlineServer)
+	require.NoError(t, err)
+
+	testCtx.fakeSite.SetDialError("offline-host."+testCtx.clusterName, fmt.Errorf("offline"))
+	testCtx.proxyServer.cfg.ShuffleDatabaseServers = func(servers []types.DatabaseServer) {
+		for i := range servers {
+			if servers[i].GetHostID() == "offline-host" {
+				for j := range servers {
+					if servers[j].GetHostID() != "offline-host" {
+						servers[i], servers[j] = servers[j], servers[i]
+						break
+					}
+				}
+				break
+			}
+		}
+	}
+	go testCtx.startHandlingConnections()
+	testCtx.createUserAndRole(ctx, t, "alice", "admin", []string{types.Wildcard}, []string{types.Wildcard})
+	conn, err := testCtx.postgresClient(ctx, "alice", "postgres", "postgres", "postgres")
+	require.NoError(t, err)
+	require.NoError(t, conn.Close(ctx))
+
+	testCtx.fakeSite.SetDialError(server.GetHostID()+"."+testCtx.clusterName, fmt.Errorf("healthy host offline"))
+	_, err = testCtx.postgresClient(ctx, "alice", "postgres", "postgres", "postgres")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "offline")
+	require.Contains(t, err.Error(), "healthy host offline")
+}
+
 func TestAccessMySQL(t *testing.T) {
 	ctx := context.Background()
 	testCtx := setupTestContext(ctx, t, withSelfHostedMySQL("mysql"))
@@ -282,6 +319,7 @@ type testContext struct {
 	mysqlListener net.Listener
 	proxyConn     chan (net.Conn)
 	server        *Server
+	fakeSite      *reversetunnel.FakeRemoteSite
 	emitter       *testEmitter
 	hostCA        types.CertAuthority
 	// postgres is a collection of Postgres databases the test uses.
@@ -466,14 +504,13 @@ func setupTestContext(ctx context.Context, t *testing.T, withDatabases ...withDa
 
 	// Establish fake reversetunnel b/w database proxy and database service.
 	testCtx.proxyConn = make(chan net.Conn)
+	testCtx.fakeSite = &reversetunnel.FakeRemoteSite{
+		Name:        testCtx.clusterName,
+		ConnCh:      testCtx.proxyConn,
+		AccessPoint: proxyAuthClient,
+	}
 	tunnel := &reversetunnel.FakeServer{
-		Sites: []reversetunnel.RemoteSite{
-			&reversetunnel.FakeRemoteSite{
-				Name:        testCtx.clusterName,
-				ConnCh:      testCtx.proxyConn,
-				AccessPoint: proxyAuthClient,
-			},
-		},
+		Sites: []reversetunnel.RemoteSite{testCtx.fakeSite},
 	}
 
 	// Create test audit events emitter.
