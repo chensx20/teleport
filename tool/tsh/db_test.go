@@ -19,6 +19,7 @@ package main
 import (
 	"testing"
 
+	"github.com/gravitational/teleport/api/types"
 	"github.com/pborman/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -36,4 +37,15 @@ func TestFetchDatabaseCreds(t *testing.T) {
 
 	err = fetchDatabaseCreds(&cf, tc)
 	require.NoError(t, err)
+}
+
+func TestUniqueDatabaseServers(t *testing.T) {
+	first := types.NewDatabaseServerV3("shared", nil, types.DatabaseServerSpecV3{Hostname: "first"})
+	duplicate := types.NewDatabaseServerV3("shared", nil, types.DatabaseServerSpecV3{Hostname: "second"})
+	other := types.NewDatabaseServerV3("other", nil, types.DatabaseServerSpecV3{})
+
+	servers := uniqueDatabaseServers([]types.DatabaseServer{first, duplicate, other})
+	require.Len(t, servers, 2)
+	require.Same(t, first, servers[0])
+	require.Same(t, other, servers[1])
 }
