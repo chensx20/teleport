@@ -235,6 +235,9 @@ type TeleportProcess struct {
 	backend backend.Backend
 	// auditLog is the initialized audit log
 	auditLog events.IAuditLog
+	// uploaderOnce coordinates uploader initialization across services.
+	uploaderOnce sync.Once
+	uploaderErr  error
 
 	// identities of this process (credentials to auth sever, basically)
 	Identities map[teleport.Role]*auth.Identity
@@ -1840,6 +1843,13 @@ func (process *TeleportProcess) registerWithAuthServer(role teleport.Role, event
 }
 
 func (process *TeleportProcess) initUploaderService(accessPoint auth.AccessPoint, auditLog events.IAuditLog) error {
+	process.uploaderOnce.Do(func() {
+		process.uploaderErr = process.startUploaderService(accessPoint, auditLog)
+	})
+	return trace.Wrap(process.uploaderErr)
+}
+
+func (process *TeleportProcess) startUploaderService(accessPoint auth.AccessPoint, auditLog events.IAuditLog) error {
 	log := process.log.WithFields(logrus.Fields{
 		trace.Component: teleport.Component(teleport.ComponentAuditLog, process.id),
 	})
@@ -2550,19 +2560,19 @@ func (process *TeleportProcess) initProxyEndpoint(conn *Connector) error {
 		component := teleport.Component(teleport.ComponentProxy, teleport.ComponentProxyKube)
 		kubeServer, err = kubeproxy.NewTLSServer(kubeproxy.TLSServerConfig{
 			ForwarderConfig: kubeproxy.ForwarderConfig{
-				Namespace:       defaults.Namespace,
-				Keygen:          cfg.Keygen,
-				ClusterName:     conn.ServerIdentity.Cert.Extensions[utils.CertExtensionAuthority],
-				Tunnel:          tsrv,
-				Auth:            authorizer,
-				Client:          conn.Client,
-				StreamEmitter:   streamEmitter,
-				DataDir:         cfg.DataDir,
-				AccessPoint:     accessPoint,
-				ServerID:        cfg.HostUUID,
-				ClusterOverride: cfg.Proxy.Kube.ClusterOverride,
-				KubeconfigPath:  cfg.Proxy.Kube.KubeconfigPath,
-				Component:       component,
+				Namespace:        defaults.Namespace,
+				Keygen:           cfg.Keygen,
+				LocalClusterName: conn.ServerIdentity.Cert.Extensions[utils.CertExtensionAuthority],
+				Tunnel:           tsrv,
+				Authorizer:       authorizer,
+				AuthClient:       conn.Client,
+				StreamEmitter:    streamEmitter,
+				DataDir:          cfg.DataDir,
+				AccessPoint:      accessPoint,
+				ServerID:         cfg.HostUUID,
+				ClusterOverride:  cfg.Proxy.Kube.ClusterOverride,
+				KubeconfigPath:   cfg.Proxy.Kube.KubeconfigPath,
+				Component:        component,
 			},
 			TLS:           tlsConfig,
 			LimiterConfig: cfg.Proxy.Limiter,

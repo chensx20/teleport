@@ -21,6 +21,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/defaults"
+	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/reversetunnel"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
@@ -43,6 +46,44 @@ import (
 )
 
 type ServiceTestSuite struct {
+}
+
+type uploaderTestAccessPoint struct {
+	auth.AccessPoint
+}
+
+type uploaderTestAuditLog struct {
+	events.IAuditLog
+}
+
+func TestUploaderInitialization(t *testing.T) {
+	log := logrus.New()
+	process := &TeleportProcess{
+		Config:     &Config{DataDir: t.TempDir()},
+		Supervisor: NewSupervisor("test", log),
+		log:        log,
+	}
+	accessPoint := &uploaderTestAccessPoint{}
+	auditLog := &uploaderTestAuditLog{}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- process.initUploaderService(accessPoint, auditLog)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	info, err := os.Stat(filepath.Join(process.Config.DataDir, teleport.LogsDir, teleport.ComponentUpload, events.StreamingLogsDir, defaults.Namespace))
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	require.Equal(t, 4, process.ServiceCount())
+	process.BroadcastEvent(Event{Name: TeleportExitEvent})
 }
 
 var _ = check.Suite(&ServiceTestSuite{})

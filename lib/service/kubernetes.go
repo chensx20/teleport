@@ -149,6 +149,9 @@ func (process *TeleportProcess) initKubernetesService(log *logrus.Entry, conn *C
 		}()
 		log.Info("Started reverse tunnel client.")
 	}
+	if err := process.initUploaderService(accessPoint, conn.Client); err != nil {
+		return trace.Wrap(err)
+	}
 
 	var dynLabels *labels.Dynamic
 	if len(cfg.Kube.DynamicLabels) != 0 {
@@ -198,22 +201,22 @@ func (process *TeleportProcess) initKubernetesService(log *logrus.Entry, conn *C
 
 	kubeServer, err := kubeproxy.NewTLSServer(kubeproxy.TLSServerConfig{
 		ForwarderConfig: kubeproxy.ForwarderConfig{
-			Namespace:       defaults.Namespace,
-			Keygen:          cfg.Keygen,
-			ClusterName:     conn.ServerIdentity.Cert.Extensions[utils.CertExtensionAuthority],
-			Auth:            authorizer,
-			Client:          conn.Client,
-			StreamEmitter:   streamEmitter,
-			DataDir:         cfg.DataDir,
-			AccessPoint:     accessPoint,
-			ServerID:        cfg.HostUUID,
-			Context:         process.ExitContext(),
-			KubeconfigPath:  cfg.Kube.KubeconfigPath,
-			KubeClusterName: cfg.Kube.KubeClusterName,
-			NewKubeService:  true,
-			Component:       teleport.ComponentKube,
-			StaticLabels:    cfg.Kube.StaticLabels,
-			DynamicLabels:   dynLabels,
+			Namespace:        defaults.Namespace,
+			Keygen:           cfg.Keygen,
+			LocalClusterName: conn.ServerIdentity.Cert.Extensions[utils.CertExtensionAuthority],
+			Authorizer:       authorizer,
+			AuthClient:       conn.Client,
+			StreamEmitter:    streamEmitter,
+			DataDir:          cfg.DataDir,
+			AccessPoint:      accessPoint,
+			ServerID:         cfg.HostUUID,
+			ParentContext:    process.ExitContext(),
+			KubeconfigPath:   cfg.Kube.KubeconfigPath,
+			KubeClusterName:  cfg.Kube.KubeClusterName,
+			NewKubeService:   true,
+			Component:        teleport.ComponentKube,
+			StaticLabels:     cfg.Kube.StaticLabels,
+			DynamicLabels:    dynLabels,
 		},
 		TLS:           tlsConfig,
 		AccessPoint:   accessPoint,

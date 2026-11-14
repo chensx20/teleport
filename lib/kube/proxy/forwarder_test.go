@@ -45,8 +45,8 @@ func (s ForwarderSuite) TestRequestCertificate(c *check.C) {
 	c.Assert(err, check.IsNil)
 	f := &Forwarder{
 		ForwarderConfig: ForwarderConfig{
-			Keygen: testauthority.New(),
-			Client: cl,
+			Keygen:     testauthority.New(),
+			AuthClient: cl,
 		},
 		log: logrus.New(),
 	}
@@ -89,42 +89,33 @@ func (s ForwarderSuite) TestRequestCertificate(c *check.C) {
 	c.Assert(*idFromCSR, check.DeepEquals, ctx.Identity.GetIdentity())
 }
 
-func (s ForwarderSuite) TestGetClusterSession(c *check.C) {
+func (s ForwarderSuite) TestGetCachedCertificate(c *check.C) {
 	clusterSessions, err := ttlmap.New(defaults.ClientCacheSize)
 	c.Assert(err, check.IsNil)
 	f := &Forwarder{
-		clusterSessions: clusterSessions,
-		log:             logrus.New(),
+		certificates: clusterSessions,
+		log:          logrus.New(),
 	}
 
 	user, err := services.NewUser("bob")
 	c.Assert(err, check.IsNil)
 	ctx := authContext{
 		teleportCluster: teleportClusterClient{
-			isRemote:       true,
-			name:           "site a",
-			isRemoteClosed: func() bool { return false },
+			isRemote: true,
+			name:     "site a",
 		},
 		Context: auth.Context{
 			User: user,
 		},
 	}
-	sess := &clusterSession{authContext: ctx}
+	cert := &tls.Config{}
 
-	// Initial clusterSessions is empty, no session should be found.
-	c.Assert(f.getClusterSession(ctx), check.IsNil)
+	// No certificate is cached initially.
+	c.Assert(f.getCachedCertificate(ctx), check.IsNil)
 
-	// Add a session to clusterSessions, getClusterSession should find it.
-	clusterSessions.Set(ctx.key(), sess, time.Hour)
-	c.Assert(f.getClusterSession(ctx), check.Equals, sess)
-
-	// Close the RemoteSite out-of-band (like when a remote cluster got removed
-	// via tctl), getClusterSession should notice this and discard the
-	// clusterSession.
-	sess.authContext.teleportCluster.isRemoteClosed = func() bool { return true }
-	c.Assert(f.getClusterSession(ctx), check.IsNil)
-	_, ok := f.clusterSessions.Get(ctx.key())
-	c.Assert(ok, check.Equals, false)
+	// A cached certificate can be reused.
+	clusterSessions.Set(ctx.key(), cert, time.Hour)
+	c.Assert(f.getCachedCertificate(ctx), check.Equals, cert)
 }
 
 func TestAuthenticate(t *testing.T) {
@@ -150,8 +141,8 @@ func TestAuthenticate(t *testing.T) {
 	f := &Forwarder{
 		log: logrus.New(),
 		ForwarderConfig: ForwarderConfig{
-			ClusterName: "local",
-			AccessPoint: ap,
+			LocalClusterName: "local",
+			AccessPoint:      ap,
 		},
 	}
 
@@ -413,7 +404,7 @@ func TestAuthenticate(t *testing.T) {
 			if tt.authzErr {
 				authz.err = trace.AccessDenied("denied!")
 			}
-			f.Auth = authz
+			f.Authorizer = authz
 
 			req := &http.Request{
 				Host:       "example.com",
@@ -444,7 +435,7 @@ func TestAuthenticate(t *testing.T) {
 			require.Empty(t, cmp.Diff(gotCtx, tt.wantCtx,
 				cmp.AllowUnexported(authContext{}, teleportClusterClient{}),
 				cmpopts.IgnoreFields(authContext{}, "clientIdleTimeout", "sessionTTL", "Context", "clusterConfig", "disconnectExpiredCert"),
-				cmpopts.IgnoreFields(teleportClusterClient{}, "dial", "isRemoteClosed"),
+				cmpopts.IgnoreFields(teleportClusterClient{}, "dial"),
 			))
 		})
 	}
@@ -578,10 +569,12 @@ func (s ForwarderSuite) TestNewClusterSession(c *check.C) {
 		log: logrus.New(),
 		ForwarderConfig: ForwarderConfig{
 			Keygen:      testauthority.New(),
-			Client:      csrClient,
+			AuthClient:  csrClient,
 			AccessPoint: mockAccessPoint{},
 		},
-		clusterSessions: clusterSessions,
+		certificates:   clusterSessions,
+		activeRequests: make(map[string]context.Context),
+		ctx:            context.Background(),
 	}
 	user, err := services.NewUser("bob")
 	c.Assert(err, check.IsNil)
@@ -607,7 +600,7 @@ func (s ForwarderSuite) TestNewClusterSession(c *check.C) {
 	_, err = f.newClusterSession(authCtx)
 	c.Assert(err, check.NotNil)
 	c.Assert(trace.IsNotFound(err), check.Equals, true)
-	c.Assert(f.clusterSessions.Len(), check.Equals, 0)
+	c.Assert(f.certificates.Len(), check.Equals, 0)
 
 	f.creds = map[string]*kubeCreds{
 		"local": {
@@ -638,9 +631,7 @@ func (s ForwarderSuite) TestNewClusterSession(c *check.C) {
 	}
 	sess, err := f.newClusterSession(authCtx)
 	c.Assert(err, check.IsNil)
-	sess, err = f.setClusterSession(sess)
-	c.Assert(err, check.IsNil)
-	c.Assert(f.clusterSessions.Len(), check.Equals, 1)
+	c.Assert(f.certificates.Len(), check.Equals, 0)
 	c.Assert(sess.authContext.teleportCluster.targetAddr, check.Equals, f.creds["local"].targetAddr)
 	c.Assert(sess.forwarder, check.NotNil)
 	// Make sure newClusterSession used f.creds instead of requesting a
@@ -669,9 +660,7 @@ func (s ForwarderSuite) TestNewClusterSession(c *check.C) {
 	}
 	sess, err = f.newClusterSession(authCtx)
 	c.Assert(err, check.IsNil)
-	sess, err = f.setClusterSession(sess)
-	c.Assert(err, check.IsNil)
-	c.Assert(f.clusterSessions.Len(), check.Equals, 2)
+	c.Assert(f.certificates.Len(), check.Equals, 1)
 	c.Assert(sess.authContext.teleportCluster.targetAddr, check.Equals, reversetunnel.LocalKubernetes)
 	c.Assert(sess.forwarder, check.NotNil)
 	// Make sure newClusterSession obtained a new client cert instead of using
@@ -679,6 +668,57 @@ func (s ForwarderSuite) TestNewClusterSession(c *check.C) {
 	c.Assert(sess.tlsConfig, check.Not(check.Equals), f.creds["local"].tlsConfig)
 	c.Assert(sess.tlsConfig.Certificates[0].Certificate[0], check.DeepEquals, csrClient.lastCert.Raw)
 	c.Assert(sess.tlsConfig.RootCAs.Subjects(), check.DeepEquals, [][]byte{csrClient.ca.Cert.RawSubject})
+	first := sess
+	authCtx.clientIdleTimeout = time.Minute
+	sess, err = f.newClusterSession(authCtx)
+	c.Assert(err, check.IsNil)
+	c.Assert(sess, check.Not(check.Equals), first)
+	c.Assert(sess.tlsConfig, check.Equals, first.tlsConfig)
+	c.Assert(sess.clientIdleTimeout, check.Equals, time.Minute)
+}
+
+func (s ForwarderSuite) TestClusterSessionUsesCurrentEndpoint(c *check.C) {
+	certificates, err := ttlmap.New(defaults.ClientCacheSize)
+	c.Assert(err, check.IsNil)
+	client, err := newMockCSRClient()
+	c.Assert(err, check.IsNil)
+	user, err := services.NewUser("bob")
+	c.Assert(err, check.IsNil)
+	endpoint := func(name, addr string) services.Server {
+		return &services.ServerV2{
+			Metadata: services.Metadata{Name: name},
+			Spec: services.ServerSpecV2{
+				Addr:               addr,
+				KubernetesClusters: []*services.KubernetesCluster{{Name: "kube"}},
+			},
+		}
+	}
+	ap := &mockAccessPoint{kubeServices: []services.Server{endpoint("first", "first:3026")}}
+	f := &Forwarder{
+		ForwarderConfig: ForwarderConfig{Keygen: testauthority.New(), AuthClient: client, AccessPoint: ap},
+		log:             logrus.New(),
+		certificates:    certificates,
+		activeRequests:  make(map[string]context.Context),
+		ctx:             context.Background(),
+	}
+	ctx := authContext{
+		Context:         auth.Context{User: user, Identity: auth.WrapIdentity(tlsca.Identity{Username: "bob"})},
+		teleportCluster: teleportClusterClient{name: "local"},
+		kubeCluster:     "kube",
+		sessionTTL:      time.Minute,
+	}
+	first, err := f.getOrCreateClusterSession(ctx)
+	c.Assert(err, check.IsNil)
+	c.Assert(first.teleportCluster.targetAddr, check.Equals, "first:3026")
+	ap.kubeServices = []services.Server{endpoint("second", "second:3026")}
+	second, err := f.getOrCreateClusterSession(ctx)
+	c.Assert(err, check.IsNil)
+	c.Assert(second.teleportCluster.targetAddr, check.Equals, "second:3026")
+	c.Assert(second.teleportCluster.serverID, check.Equals, "second.local")
+	c.Assert(second.tlsConfig, check.Equals, first.tlsConfig)
+	ap.kubeServices = nil
+	_, err = f.getOrCreateClusterSession(ctx)
+	c.Assert(trace.IsNotFound(err), check.Equals, true)
 }
 
 // mockCSRClient to intercept ProcessKubeCSR requests, record them and return a
