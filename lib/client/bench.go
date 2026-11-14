@@ -42,6 +42,58 @@ type Benchmark struct {
 	Interactive bool
 }
 
+// LinearBenchmarkGenerator produces benchmark configurations at increasing rates.
+type LinearBenchmarkGenerator struct {
+	template  Benchmark
+	current   int
+	upper     int
+	step      int
+	exhausted bool
+}
+
+// NewLinearBenchmarkGenerator creates a generator for rates from lower to upper.
+func NewLinearBenchmarkGenerator(template Benchmark, lower, upper, step int) (*LinearBenchmarkGenerator, error) {
+	if lower <= 0 {
+		return nil, trace.BadParameter("lower rate must be positive")
+	}
+	if upper < lower {
+		return nil, trace.BadParameter("upper rate must be at least the lower rate")
+	}
+	if upper > int(time.Second) {
+		return nil, trace.BadParameter("upper rate must not exceed %v", int(time.Second))
+	}
+	if step <= 0 {
+		return nil, trace.BadParameter("rate step must be positive")
+	}
+	template.Command = copyBenchmarkCommand(template.Command)
+	return &LinearBenchmarkGenerator{template: template, current: lower, upper: upper, step: step}, nil
+}
+
+// Next returns the next benchmark configuration, or false when exhausted.
+func (g *LinearBenchmarkGenerator) Next() (Benchmark, bool) {
+	if g.exhausted {
+		return Benchmark{}, false
+	}
+	benchmark := g.template
+	benchmark.Rate = g.current
+	benchmark.Command = copyBenchmarkCommand(g.template.Command)
+	if g.step > g.upper-g.current {
+		g.exhausted = true
+	} else {
+		g.current += g.step
+	}
+	return benchmark, true
+}
+
+func copyBenchmarkCommand(command []string) []string {
+	if command == nil {
+		return nil
+	}
+	commandCopy := make([]string, len(command))
+	copy(commandCopy, command)
+	return commandCopy
+}
+
 // BenchmarkResult is a result of the benchmark
 type BenchmarkResult struct {
 	// RequestsOriginated is amount of reuqests originated
