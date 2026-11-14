@@ -37,7 +37,7 @@ import (
 // TLSServerConfig is a configuration for TLS server
 type TLSServerConfig struct {
 	// ForwarderConfig is a config of a forwarder
-	ForwarderConfig
+	ForwarderConfig ForwarderConfig
 	// TLS is a base TLS configuration
 	TLS *tls.Config
 	// LimiterConfig is limiter config
@@ -75,8 +75,7 @@ func (c *TLSServerConfig) CheckAndSetDefaults() error {
 // TLSServer is TLS auth server
 type TLSServer struct {
 	*http.Server
-	// TLSServerConfig is TLS server configuration used for auth server
-	TLSServerConfig
+	config    TLSServerConfig
 	fwd       *Forwarder
 	mu        sync.Mutex
 	listener  net.Listener
@@ -112,33 +111,33 @@ func NewTLSServer(cfg TLSServerConfig) (*TLSServer, error) {
 	cfg.TLS.ClientAuth = tls.VerifyClientCertIfGiven
 
 	server := &TLSServer{
-		fwd:             fwd,
-		TLSServerConfig: cfg,
+		fwd:    fwd,
+		config: cfg,
 		Server: &http.Server{
 			Handler:           limiter,
 			ReadHeaderTimeout: defaults.DefaultDialTimeout * 2,
 		},
 	}
-	server.TLS.GetConfigForClient = server.GetConfigForClient
+	server.config.TLS.GetConfigForClient = server.GetConfigForClient
 
 	// Start the heartbeat to announce kubernetes_service presence.
 	//
 	// Only announce when running in an actual kubernetes_service, or when
 	// running in proxy_service with local kube credentials. This means that
 	// proxy_service will pretend to also be kubernetes_service.
-	if cfg.NewKubeService || len(fwd.kubeClusters()) > 0 {
-		log.Debugf("Starting kubernetes_service heartbeats for %q", cfg.Component)
+	if cfg.ForwarderConfig.NewKubeService || len(fwd.kubeClusters()) > 0 {
+		log.Debugf("Starting kubernetes_service heartbeats for %q", cfg.ForwarderConfig.Component)
 		server.heartbeat, err = srv.NewHeartbeat(srv.HeartbeatConfig{
 			Mode:            srv.HeartbeatModeKube,
-			Context:         cfg.Context,
-			Component:       cfg.Component,
-			Announcer:       cfg.Client,
+			Context:         cfg.ForwarderConfig.ParentContext,
+			Component:       cfg.ForwarderConfig.Component,
+			Announcer:       cfg.ForwarderConfig.AuthClient,
 			GetServerInfo:   server.GetServerInfo,
 			KeepAlivePeriod: defaults.ServerKeepAliveTTL,
 			AnnouncePeriod:  defaults.ServerAnnounceTTL/2 + utils.RandomDuration(defaults.ServerAnnounceTTL/10),
 			ServerTTL:       defaults.ServerAnnounceTTL,
 			CheckPeriod:     defaults.HeartbeatCheckPeriod,
-			Clock:           cfg.Clock,
+			Clock:           cfg.ForwarderConfig.Clock,
 			OnHeartbeat:     cfg.OnHeartbeat,
 		})
 		if err != nil {
@@ -161,7 +160,7 @@ func (t *TLSServer) Serve(listener net.Listener) error {
 		go t.heartbeat.Run()
 	}
 
-	return t.Server.Serve(tls.NewListener(listener, t.TLS))
+	return t.Server.Serve(tls.NewListener(listener, t.config.TLS))
 }
 
 // Close closes the server and cleans up all resources.
@@ -188,13 +187,13 @@ func (t *TLSServer) GetConfigForClient(info *tls.ClientHelloInfo) (*tls.Config, 
 			}
 		}
 	}
-	pool, err := auth.ClientCertPool(t.AccessPoint, clusterName)
+	pool, err := auth.ClientCertPool(t.config.AccessPoint, clusterName)
 	if err != nil {
 		log.Errorf("failed to retrieve client pool: %v", trace.DebugReport(err))
 		// this falls back to the default config
 		return nil, nil
 	}
-	tlsCopy := t.TLS.Clone()
+	tlsCopy := t.config.TLS.Clone()
 	tlsCopy.ClientCAs = pool
 	return tlsCopy, nil
 }
@@ -215,8 +214,8 @@ func (t *TLSServer) GetServerInfo() (services.Server, error) {
 	//
 	// Note: we *don't* want to add suffix for kubernetes_service!
 	// This breaks reverse tunnel routing, which uses server.Name.
-	name := t.ServerID
-	if !t.NewKubeService {
+	name := t.config.ForwarderConfig.ServerID
+	if !t.config.ForwarderConfig.NewKubeService {
 		name += "-proxy_service"
 	}
 
@@ -225,7 +224,7 @@ func (t *TLSServer) GetServerInfo() (services.Server, error) {
 		Version: services.V2,
 		Metadata: services.Metadata{
 			Name:      name,
-			Namespace: t.Namespace,
+			Namespace: t.config.ForwarderConfig.Namespace,
 		},
 		Spec: services.ServerSpecV2{
 			Addr:               addr,
@@ -233,6 +232,6 @@ func (t *TLSServer) GetServerInfo() (services.Server, error) {
 			KubernetesClusters: t.fwd.kubeClusters(),
 		},
 	}
-	srv.SetTTL(t.Clock, defaults.ServerAnnounceTTL)
+	srv.SetTTL(t.config.ForwarderConfig.Clock, defaults.ServerAnnounceTTL)
 	return srv, nil
 }
